@@ -1,0 +1,200 @@
+#!/usr/bin/env python
+
+"""
+http://man7.org/linux/man-pages/man5/proc.5.html
+
+mon -p 123 -i10ms -frss,vm
+mon --pid=123 --interval=10ms --fields=rss,vm
+"""
+
+import os
+import optparse
+import sys
+import time
+import re
+import datetime
+
+
+DEFAULT_INTERVAL = 1.0
+
+DEFAULT_DELIMITER = ' '
+
+DEFAULT_METRIC_NAMES = ['vm_size', 'vm_rss', 'fd']
+
+DEFAULT_DATETIME_FORMAT = '%Y-%m-%d_%H:%M:%S.%f'
+
+METRIC_NOT_FOUND_VALUE = '-'
+
+
+def fatal(message):
+    sys.stderr.write('{}\n'.format(message))
+    sys.exit(1)
+
+
+def done():
+    sys.exit(0)
+
+
+def validate_options(args):
+    if args.pid is None:
+        fatal('Process pid should be given. Use --help for help.')
+
+
+def get_options(argv):
+    parser = optparse.OptionParser(conflict_handler='error')
+
+    parser.add_option(
+        '-p', '--pid',
+        dest='pid',
+        help='Process pid'
+    )
+    parser.add_option(
+        '-i', '--interval',
+        dest='interval',
+        default=DEFAULT_INTERVAL,
+        help='Interval between checks.'
+    )
+    parser.add_option(
+        '-m', '--metrics',
+        dest='metrics',
+        help='Metrics to show.'
+    )
+    parser.add_option(
+        '-d', '--delimiter',
+        dest='delimiter',
+        default=DEFAULT_DELIMITER,
+        help='Cells delimiter.'
+    )
+    parser.add_option(
+        '--dt-format',
+        dest='datetime_format',
+        default=DEFAULT_DATETIME_FORMAT,
+        help='Datetime format.'
+    )
+
+    opts, _ = parser.parse_args(args=argv)
+
+    validate_options(opts)
+
+    return opts
+
+
+def convert_interval(interval):
+    return float(interval)
+
+
+pattern = re.compile(r'^(\d+)\skB$')
+
+
+def to_bytes(human_value):
+    return pattern.findall(human_value).pop()
+
+
+def get_memory(pid):
+    metrics = {}
+    status_file_path = '/proc/{pid}/status'.format(pid=pid)
+
+    try:
+        with open(status_file_path) as fp:
+            for line in fp:
+                chunks = line.split(':')
+
+                key, value = chunks[0].strip(), chunks[1].strip()
+                metrics[key] = value
+
+        return {
+            'vm_rss': to_bytes(metrics['VmRSS']),
+            'vm_size': to_bytes(metrics['VmSize']),
+        }
+
+    except (IOError, OSError):
+        return None
+
+
+def get_fs(pid):
+    descriptors_dir_path = '/proc/{pid}/fd/'.format(pid=pid)
+
+    try:
+        return {
+            'fd': len(os.listdir(descriptors_dir_path))
+        }
+    except (IOError, OSError):
+        return None
+
+
+METRIC_SOURCES = (
+    get_memory,
+    get_fs
+)
+
+
+def get_metrics(pid):
+    metrics = {}
+
+    for source in METRIC_SOURCES:
+        new_metrics = source(pid)
+        if new_metrics is not None:
+            metrics.update(new_metrics)
+
+    return metrics
+
+
+class Formatter(object):
+    def __init__(self,
+                 metric_names,
+                 delimiter=DEFAULT_DELIMITER,
+                 datetime_format=DEFAULT_DATETIME_FORMAT):
+        self._metric_names = metric_names
+        self._delimiter = delimiter
+        self._datetime_format = datetime_format
+
+    def print_header(self):
+        print(self._delimiter.join(['dt'] + self._metric_names))
+
+    def print_metrics(self, metrics):
+        metric_values = [datetime.datetime.now().strftime(self._datetime_format)]
+        for name in self._metric_names:
+            metric = metrics.get(name, METRIC_NOT_FOUND_VALUE)
+            metric_values.append(str(metric))
+
+        print(self._delimiter.join(metric_values))
+
+
+def metrics_loop(options):
+    interval = convert_interval(options.interval)
+
+    if options.metrics:
+        metrics_names = options.metrics.split(',')
+    else:
+        metrics_names = DEFAULT_METRIC_NAMES
+
+    formatter = Formatter(
+        metrics_names,
+        delimiter=options.delimiter,
+        datetime_format=options.datetime_format
+    )
+
+    formatter.print_header()
+
+    while True:
+        metrics = None
+        try:
+            metrics = get_metrics(options.pid)
+        except Exception as exc:
+            fatal('Unexpected error: {error}.'.format(error=exc))
+
+        if not metrics:
+            done()
+
+        formatter.print_metrics(metrics)
+
+        time.sleep(interval)
+
+
+def main():
+    options = get_options(sys.argv[1:])
+    metrics_loop(options)
+
+
+if __name__ == '__main__':
+    main()

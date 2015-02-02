@@ -27,7 +27,7 @@ METRIC_NOT_FOUND_VALUE = '-'
 
 
 def fatal(message):
-    sys.stderr.write('{}\n'.format(message))
+    sys.stderr.write('{0}\n'.format(message))
     sys.exit(1)
 
 

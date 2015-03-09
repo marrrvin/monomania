@@ -21,11 +21,143 @@ DEFAULT_INTERVAL = 1.0
 
 DEFAULT_DELIMITER = ' '
 
-DEFAULT_METRIC_NAMES = ['vm_size', 'vm_rss', 'cpu', 'fd']
-
 DEFAULT_DATETIME_FORMAT = '%Y-%m-%d_%H:%M:%S.%f'
 
 METRIC_NOT_FOUND_VALUE = '-'
+
+
+kb_value_pattern = re.compile(r'^(\d+)\skB$')
+
+
+def to_bytes(human_value):
+    return kb_value_pattern.findall(human_value).pop()
+
+
+class MetricProvider(object):
+    @property
+    def available_metrics(self):
+        raise NotImplementedError
+
+    def get(self, pid):
+        raise NotImplementedError
+
+
+class MemoryMetricProvider(MetricProvider):
+    @property
+    def available_metrics(self):
+        return 'vm', 'rss'
+
+    def get(self, pid):
+        metrics = {}
+        try:
+            with open('/proc/{pid}/status'.format(pid=pid)) as fp:
+                for line in fp:
+                    chunks = line.split(':')
+
+                    key, value = chunks[0].strip(), chunks[1].strip()
+                    metrics[key] = value
+
+            return {
+                'rss': to_bytes(metrics['VmRSS']),
+                'vm': to_bytes(metrics['VmSize']),
+            }
+        except (IOError, OSError):
+            return None
+
+
+class FdMetricProvider(MetricProvider):
+    @property
+    def available_metrics(self):
+        return 'fd',
+
+    def get(self, pid):
+        try:
+            return {
+                'fd': len(os.listdir('/proc/{pid}/fd/'.format(pid=pid)))
+            }
+        except (IOError, OSError):
+            return None
+
+
+class CpuMetricProvider(MetricProvider):
+    @property
+    def available_metrics(self):
+        return 'cpu',
+
+    def get(self, pid):
+        try:
+            with open('/proc/{pid}/stat'.format(pid=pid), 'r') as fp:
+                process_stat = fp.readline().strip().split(' ')
+        except (IOError, OSError):
+            return None
+
+        try:
+            with open('/proc/uptime', 'r') as fp:
+                uptime_stat = fp.readline().strip().split(' ')
+        except (OSError, OSError):
+            return None
+
+        uptime = float(uptime_stat[0])
+
+        utime = int(process_stat[13])
+        stime = int(process_stat[14])
+        cutime = int(process_stat[15])
+        cstime = int(process_stat[16])
+        starttime = int(process_stat[21])
+
+        total_time = utime + stime
+        total_time_with_subprocesses = total_time + cutime + cstime
+
+        conf_code = os.sysconf_names['SC_CLK_TCK']
+        Hertz = os.sysconf(conf_code)
+
+        seconds = uptime - (starttime / Hertz)
+
+        cpu_usage = 100 * ((total_time_with_subprocesses / Hertz) / seconds)
+
+        return {
+            'cpu': cpu_usage
+        }
+
+
+METRIC_PROVIDERS = (
+    MemoryMetricProvider(),
+    FdMetricProvider(),
+    CpuMetricProvider()
+)
+
+
+def collect_metrics(metric_names, pid):
+    metrics = {}
+    for provider in METRIC_PROVIDERS:
+        for metric_name in metric_names:
+            if metric_name in provider.available_metrics:
+                new_metrics = provider.get(pid)
+                if new_metrics is not None:
+                    metrics.update(new_metrics)
+
+    return metrics
+
+
+class Formatter(object):
+    def __init__(self,
+                 metric_names,
+                 delimiter=DEFAULT_DELIMITER,
+                 datetime_format=DEFAULT_DATETIME_FORMAT):
+        self._metric_names = metric_names
+        self._delimiter = delimiter
+        self._datetime_format = datetime_format
+
+    def print_header(self):
+        print(self._delimiter.join(['dt'] + self._metric_names))
+
+    def print_metrics(self, metrics):
+        metric_values = [datetime.datetime.now().strftime(self._datetime_format)]
+        for name in self._metric_names:
+            metric = metrics.get(name, METRIC_NOT_FOUND_VALUE)
+            metric_values.append(str(metric))
+
+        print(self._delimiter.join(metric_values))
 
 
 def fatal(message):
@@ -40,10 +172,6 @@ def done():
 def validate_options(args):
     if args.pid is None:
         fatal('Process pid should be given. Use --help for help.')
-
-
-def parse_list(opt, value, parser, *args, **kwargs):
-    return [c.strip() for c in value.split(',') if c.strip() != '']
 
 
 def get_options(argv):
@@ -64,9 +192,6 @@ def get_options(argv):
     parser.add_option(
         '-m', '--metrics',
         dest='metric_names',
-        action='callback',
-        callback=parse_list,
-        default=DEFAULT_METRIC_NAMES,
         help='Metrics to show.'
     )
     parser.add_option(
@@ -96,123 +221,17 @@ def get_options(argv):
     return opts
 
 
-kb_value_pattern = re.compile(r'^(\d+)\skB$')
-
-
-def to_bytes(human_value):
-    return kb_value_pattern.findall(human_value).pop()
-
-
-def get_memory(pid):
-    metrics = {}
-    status_file_path = '/proc/{pid}/status'.format(pid=pid)
-
-    try:
-        with open(status_file_path) as fp:
-            for line in fp:
-                chunks = line.split(':')
-
-                key, value = chunks[0].strip(), chunks[1].strip()
-                metrics[key] = value
-
-        return {
-            'vm_rss': to_bytes(metrics['VmRSS']),
-            'vm_size': to_bytes(metrics['VmSize']),
-        }
-
-    except (IOError, OSError):
-        return None
-
-
-def get_fs(pid):
-    descriptors_dir_path = '/proc/{pid}/fd/'.format(pid=pid)
-
-    try:
-        return {
-            'fd': len(os.listdir(descriptors_dir_path))
-        }
-    except (IOError, OSError):
-        return None
-
-
-def get_cpu(pid):
-    try:
-        with open('/proc/{pid}/stat'.format(pid=pid), 'r') as fp:
-            process_stat = fp.readline().strip().split(' ')
-    except (IOError, OSError):
-        return None
-
-    try:
-        with open('/proc/uptime', 'r') as fp:
-            uptime_stat = fp.readline().strip().split(' ')
-    except (OSError, OSError):
-        return None
-
-    uptime = float(uptime_stat[0])
-
-    utime = int(process_stat[13])
-    stime = int(process_stat[14])
-    cutime = int(process_stat[15])
-    cstime = int(process_stat[16])
-    starttime = int(process_stat[21])
-
-    total_time = utime + stime
-    total_time_with_subprocesses = total_time + cutime + cstime
-
-    conf_code = os.sysconf_names['SC_CLK_TCK']
-    Hertz = os.sysconf(conf_code)
-
-    seconds = uptime - (starttime / Hertz)
-
-    cpu_usage = 100 * ((total_time_with_subprocesses / Hertz) / seconds)
-
-    return {
-        'cpu': cpu_usage
-    }
-
-
-METRIC_SOURCES = (
-    get_memory,
-    get_fs,
-    get_cpu
-)
-
-
-def collect_metrics(pid):
-    metrics = {}
-
-    for source in METRIC_SOURCES:
-        new_metrics = source(pid)
-        if new_metrics is not None:
-            metrics.update(new_metrics)
-
-    return metrics
-
-
-class Formatter(object):
-    def __init__(self,
-                 metric_names,
-                 delimiter=DEFAULT_DELIMITER,
-                 datetime_format=DEFAULT_DATETIME_FORMAT):
-        self._metric_names = metric_names
-        self._delimiter = delimiter
-        self._datetime_format = datetime_format
-
-    def print_header(self):
-        print(self._delimiter.join(['dt'] + self._metric_names))
-
-    def print_metrics(self, metrics):
-        metric_values = [datetime.datetime.now().strftime(self._datetime_format)]
-        for name in self._metric_names:
-            metric = metrics.get(name, METRIC_NOT_FOUND_VALUE)
-            metric_values.append(str(metric))
-
-        print(self._delimiter.join(metric_values))
-
-
 def metrics_loop(options):
+    if options.metric_names:
+        print(options.metric_names)
+        metric_names = [c.strip() for c in options.metric_names.split(',') if c.strip() != '']
+    else:
+        metric_names = []
+        for provider in METRIC_PROVIDERS:
+            metric_names.extend(provider.available_metrics)
+
     formatter = Formatter(
-        options.metric_names,
+        metric_names,
         delimiter=options.delimiter,
         datetime_format=options.datetime_format
     )
@@ -221,7 +240,7 @@ def metrics_loop(options):
 
     while True:
         try:
-            metrics = collect_metrics(options.pid)
+            metrics = collect_metrics(metric_names, options.pid)
             if not metrics:
                 done()
 

@@ -43,7 +43,6 @@ def validate_options(args):
 
 
 def parse_list(opt, value, parser, *args, **kwargs):
-    #import ipdb; ipdb.set_trace()
     return [c.strip() for c in value.split(',') if c.strip() != '']
 
 
@@ -158,14 +157,14 @@ def get_cpu(pid):
     starttime = int(process_stat[21])
 
     total_time = utime + stime
-    total_time_with_subporcesses = total_time + cutime + cstime
+    total_time_with_subprocesses = total_time + cutime + cstime
 
     conf_code = os.sysconf_names['SC_CLK_TCK']
     Hertz = os.sysconf(conf_code)
 
     seconds = uptime - (starttime / Hertz)
 
-    cpu_usage = 100 * ((total_time_with_subporcesses / Hertz) / seconds)
+    cpu_usage = 100 * ((total_time_with_subprocesses / Hertz) / seconds)
 
     return {
         'cpu': cpu_usage

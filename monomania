@@ -223,7 +223,6 @@ def get_options(argv):
 
 def metrics_loop(options):
     if options.metric_names:
-        print(options.metric_names)
         metric_names = [c.strip() for c in options.metric_names.split(',') if c.strip() != '']
     else:
         metric_names = []

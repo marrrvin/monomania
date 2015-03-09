@@ -2,6 +2,7 @@
 
 """
 http://man7.org/linux/man-pages/man5/proc.5.html
+http://stackoverflow.com/questions/16726779/total-cpu-usage-of-an-application-from-proc-pid-stat
 http://stackoverflow.com/questions/4189123/python-how-to-get-number-of-mili-seconds-per-jiffy
 
 mon -p 123 -i10ms -frss,vm
@@ -41,6 +42,11 @@ def validate_options(args):
         fatal('Process pid should be given. Use --help for help.')
 
 
+def parse_list(opt, value, parser, *args, **kwargs):
+    #import ipdb; ipdb.set_trace()
+    return [c.strip() for c in value.split(',') if c.strip() != '']
+
+
 def get_options(argv):
     parser = optparse.OptionParser(conflict_handler='error')
 
@@ -52,12 +58,16 @@ def get_options(argv):
     parser.add_option(
         '-i', '--interval',
         dest='interval',
+        type=float,
         default=DEFAULT_INTERVAL,
         help='Interval between checks.'
     )
     parser.add_option(
         '-m', '--metrics',
-        dest='metrics',
+        dest='metric_names',
+        action='callback',
+        callback=parse_list,
+        default=DEFAULT_METRIC_NAMES,
         help='Metrics to show.'
     )
     parser.add_option(
@@ -87,15 +97,11 @@ def get_options(argv):
     return opts
 
 
-def convert_interval(interval):
-    return float(interval)
-
-
-pattern = re.compile(r'^(\d+)\skB$')
+kb_value_pattern = re.compile(r'^(\d+)\skB$')
 
 
 def to_bytes(human_value):
-    return pattern.findall(human_value).pop()
+    return kb_value_pattern.findall(human_value).pop()
 
 
 def get_memory(pid):
@@ -206,15 +212,8 @@ class Formatter(object):
 
 
 def metrics_loop(options):
-    interval = convert_interval(options.interval)
-
-    if options.metrics:
-        metrics_names = options.metrics.split(',')
-    else:
-        metrics_names = DEFAULT_METRIC_NAMES
-
     formatter = Formatter(
-        metrics_names,
+        options.metric_names,
         delimiter=options.delimiter,
         datetime_format=options.datetime_format
     )
@@ -222,21 +221,21 @@ def metrics_loop(options):
     formatter.print_header()
 
     while True:
-        metrics = None
         try:
             metrics = collect_metrics(options.pid)
+            if not metrics:
+                done()
+
+            formatter.print_metrics(metrics)
+
+            time.sleep(options.interval)
         except Exception as exc:
             if options.debug:
                 raise
 
             fatal('Unexpected error: {error}.'.format(error=exc))
-
-        if not metrics:
+        except KeyboardInterrupt:
             done()
-
-        formatter.print_metrics(metrics)
-
-        time.sleep(interval)
 
 
 def main():

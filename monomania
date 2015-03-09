@@ -2,6 +2,7 @@
 
 """
 http://man7.org/linux/man-pages/man5/proc.5.html
+http://stackoverflow.com/questions/4189123/python-how-to-get-number-of-mili-seconds-per-jiffy
 
 mon -p 123 -i10ms -frss,vm
 mon --pid=123 --interval=10ms --fields=rss,vm
@@ -19,7 +20,7 @@ DEFAULT_INTERVAL = 1.0
 
 DEFAULT_DELIMITER = ' '
 
-DEFAULT_METRIC_NAMES = ['vm_size', 'vm_rss', 'fd']
+DEFAULT_METRIC_NAMES = ['vm_size', 'vm_rss', 'cpu', 'fd']
 
 DEFAULT_DATETIME_FORMAT = '%Y-%m-%d_%H:%M:%S.%f'
 
@@ -70,6 +71,13 @@ def get_options(argv):
         dest='datetime_format',
         default=DEFAULT_DATETIME_FORMAT,
         help='Datetime format.'
+    )
+    parser.add_option(
+        '--debug',
+        dest='debug',
+        action='store_true',
+        default=False,
+        help='Enable debug mode.'
     )
 
     opts, _ = parser.parse_args(args=argv)
@@ -122,13 +130,50 @@ def get_fs(pid):
         return None
 
 
+def get_cpu(pid):
+    try:
+        with open('/proc/{pid}/stat'.format(pid=pid), 'r') as fp:
+            process_stat = fp.readline().strip().split(' ')
+    except (IOError, OSError):
+        return None
+
+    try:
+        with open('/proc/uptime', 'r') as fp:
+            uptime_stat = fp.readline().strip().split(' ')
+    except (OSError, OSError):
+        return None
+
+    uptime = float(uptime_stat[0])
+
+    utime = int(process_stat[13])
+    stime = int(process_stat[14])
+    cutime = int(process_stat[15])
+    cstime = int(process_stat[16])
+    starttime = int(process_stat[21])
+
+    total_time = utime + stime
+    total_time_with_subporcesses = total_time + cutime + cstime
+
+    conf_code = os.sysconf_names['SC_CLK_TCK']
+    Hertz = os.sysconf(conf_code)
+
+    seconds = uptime - (starttime / Hertz)
+
+    cpu_usage = 100 * ((total_time_with_subporcesses / Hertz) / seconds)
+
+    return {
+        'cpu': cpu_usage
+    }
+
+
 METRIC_SOURCES = (
     get_memory,
-    get_fs
+    get_fs,
+    get_cpu
 )
 
 
-def get_metrics(pid):
+def collect_metrics(pid):
     metrics = {}
 
     for source in METRIC_SOURCES:
@@ -179,8 +224,11 @@ def metrics_loop(options):
     while True:
         metrics = None
         try:
-            metrics = get_metrics(options.pid)
+            metrics = collect_metrics(options.pid)
         except Exception as exc:
+            if options.debug:
+                raise
+
             fatal('Unexpected error: {error}.'.format(error=exc))
 
         if not metrics:

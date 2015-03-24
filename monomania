@@ -116,7 +116,7 @@ class CpuMetricProvider(MetricProvider):
         cpu_usage = 100 * ((total_time_with_subprocesses / Hertz) / seconds)
 
         return {
-            'cpu': cpu_usage
+            'cpu': round(cpu_usage, 2)
         }
 
 
